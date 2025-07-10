@@ -74,7 +74,8 @@ function draw() {
       trail.push(angleToVector(theta, phi, radius));
       lastMoveTime = now;
 
-      if (!notePlaying) {
+      // only trigger synth if it’s ready
+      if (synthStarted && synth && !notePlaying) {
         synth.triggerAttack(currentNote);
         notePlaying = true;
         lastNote = currentNote;
@@ -93,9 +94,11 @@ function draw() {
 
       trail.push(angleToVector(theta, phi, radius));
 
-      if (currentPlaybackNote !== null) synth.triggerRelease();
-      synth.triggerAttackRelease(currentNote, duration / 1000, undefined, 0.6);
-      currentPlaybackNote = currentNote;
+      if (synthStarted && synth) {
+        if (currentPlaybackNote !== null) synth.triggerRelease();
+        synth.triggerAttackRelease(currentNote, duration / 1000, undefined, 0.6);
+        currentPlaybackNote = currentNote;
+      }
 
       playbackIndex = (playbackIndex + 1) % path.length;
       playbackTimer = duration;
@@ -105,21 +108,25 @@ function draw() {
   // manage note play/release for recording
   if (recording) {
     if (currentNote !== lastNote) {
-      if (notePlaying) {
-        synth.triggerRelease();
-        notePlaying = false;
-      }
-      if (currentNote) {
-        synth.triggerAttack(currentNote);
-        notePlaying = true;
+      if (synthStarted && synth) {
+        if (notePlaying) {
+          synth.triggerRelease();
+          notePlaying = false;
+        }
+        if (currentNote) {
+          synth.triggerAttack(currentNote);
+          notePlaying = true;
+        }
       }
       lastNote = currentNote;
     } else if ((!moved || !isDrawing) && notePlaying && millis() - lastMoveTime > noteHoldThreshold) {
-      synth.triggerRelease();
+      if (synthStarted && synth) {
+        synth.triggerRelease();
+      }
       notePlaying = false;
       lastNote = null;
     }
-    if (currentPlaybackNote !== null) {
+    if (currentPlaybackNote !== null && synthStarted && synth) {
       synth.triggerRelease();
       currentPlaybackNote = null;
     }
@@ -220,7 +227,7 @@ async function keyPressed() {
       notePlaying = false;
       lastRecordTime = 0;
 
-      if (currentPlaybackNote !== null) {
+      if (currentPlaybackNote !== null && synthStarted && synth) {
         synth.triggerRelease();
         currentPlaybackNote = null;
       }
