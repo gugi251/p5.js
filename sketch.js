@@ -26,6 +26,8 @@ let playbackSpeed = 1;
 
 let lastRecordTime = 0;
 
+let started = false; // for user interaction start flag
+
 function setup() {
   createCanvas(800, 800, WEBGL);
   angleMode(DEGREES);
@@ -33,10 +35,70 @@ function setup() {
   textSize(24);
   fill(255);
   noStroke();
+
+  // Create overlay prompt
+  let overlay = createDiv('Click or press any key to start audio');
+  overlay.id('overlay');
+  overlay.style('position', 'fixed');
+  overlay.style('top', '0');
+  overlay.style('left', '0');
+  overlay.style('width', '100%');
+  overlay.style('height', '100%');
+  overlay.style('background-color', 'rgba(0,0,0,0.9)');
+  overlay.style('color', 'white');
+  overlay.style('display', 'flex');
+  overlay.style('justify-content', 'center');
+  overlay.style('align-items', 'center');
+  overlay.style('font-size', '32px');
+  overlay.style('z-index', '9999');
+  overlay.style('user-select', 'none');
+  overlay.style('cursor', 'pointer');
+
+  // Start on any user interaction
+  overlay.mousePressed(startAudio);
+  window.addEventListener('keydown', startAudioOnce);
+}
+
+function startAudioOnce() {
+  if (!started) {
+    startAudio();
+    window.removeEventListener('keydown', startAudioOnce);
+  }
+}
+
+async function startAudio() {
+  if (started) return;
+  started = true;
+
+  // hide overlay
+  const overlay = document.getElementById('overlay');
+  if (overlay) overlay.style.display = 'none';
+
+  await Tone.start();
+
+  synth = new Tone.DuoSynth({
+    voice0: {
+      oscillator: { type: 'sine' },
+      envelope: { attack: 0.1, decay: 0.4, sustain: 0.4, release: 1.2 },
+    },
+    voice1: {
+      oscillator: { type: 'triangle' },
+      envelope: { attack: 0.1, decay: 0.4, sustain: 0.4, release: 1.2 },
+    },
+    harmonicity: 1.25,
+    vibratoAmount: 0.2,
+  }).toDestination();
+
+  synthStarted = true;
 }
 
 function draw() {
   background(0);
+
+  if (!started) {
+    // Don't run anything else until user starts audio
+    return;
+  }
 
   // adjust playback speed with Q/E keys
   if (keyIsDown(81)) { // Q
@@ -50,14 +112,14 @@ function draw() {
   let currentNote = null;
 
   if (recording) {
-    // moving the dot on the sphere with arrow keys
+    // move dot on sphere
     if (keyIsDown(LEFT_ARROW)) { theta += thetaSpeed; moved = true; }
     if (keyIsDown(RIGHT_ARROW)) { theta -= thetaSpeed; moved = true; }
     if (keyIsDown(UP_ARROW)) { phi += phiSpeed; moved = true; }
     if (keyIsDown(DOWN_ARROW)) { phi -= phiSpeed; moved = true; }
 
-    theta = (theta + 360) % 360; // keep theta in range
-    phi = constrain(phi, 1, 179); // avoid poles
+    theta = (theta + 360) % 360;
+    phi = constrain(phi, 1, 179);
 
     if (moved && isDrawing) {
       const pitchPhi = phi <= 180 ? phi : 360 - phi;
@@ -69,20 +131,15 @@ function draw() {
       if (lastRecordTime === 0) duration = 200;
       lastRecordTime = now;
 
-      // save note info and position for playback
       path.push({ theta, phi, note: currentNote, duration });
       trail.push(angleToVector(theta, phi, radius));
       lastMoveTime = now;
 
-      // only trigger synth if it’s ready
-      if (synthStarted && synth && !notePlaying) {
-        synth.triggerAttack(currentNote);
-        notePlaying = true;
-        lastNote = currentNote;
-      }
+      if (!notePlaying) safeTriggerAttack(currentNote);
+      notePlaying = true;
+      lastNote = currentNote;
     }
   } else if (path.length > 0) {
-    // playback mode - play notes in saved path with adjusted speed
     playbackTimer -= deltaTime;
     if (playbackTimer <= 0) {
       let point = path[playbackIndex];
@@ -94,48 +151,38 @@ function draw() {
 
       trail.push(angleToVector(theta, phi, radius));
 
-      if (synthStarted && synth) {
-        if (currentPlaybackNote !== null) synth.triggerRelease();
-        synth.triggerAttackRelease(currentNote, duration / 1000, undefined, 0.6);
-        currentPlaybackNote = currentNote;
-      }
+      if (currentPlaybackNote !== null) safeTriggerRelease();
+      safeTriggerAttackRelease(currentNote, duration / 1000);
+      currentPlaybackNote = currentNote;
 
       playbackIndex = (playbackIndex + 1) % path.length;
       playbackTimer = duration;
     }
   }
 
-  // manage note play/release for recording
   if (recording) {
     if (currentNote !== lastNote) {
-      if (synthStarted && synth) {
-        if (notePlaying) {
-          synth.triggerRelease();
-          notePlaying = false;
-        }
-        if (currentNote) {
-          synth.triggerAttack(currentNote);
-          notePlaying = true;
-        }
-      }
+      if (notePlaying) safeTriggerRelease();
+      notePlaying = false;
+
+      if (currentNote) safeTriggerAttack(currentNote);
+      notePlaying = true;
       lastNote = currentNote;
     } else if ((!moved || !isDrawing) && notePlaying && millis() - lastMoveTime > noteHoldThreshold) {
-      if (synthStarted && synth) {
-        synth.triggerRelease();
-      }
+      safeTriggerRelease();
       notePlaying = false;
       lastNote = null;
     }
-    if (currentPlaybackNote !== null && synthStarted && synth) {
-      synth.triggerRelease();
+    if (currentPlaybackNote !== null) {
+      safeTriggerRelease();
       currentPlaybackNote = null;
     }
   }
 
-  // calculate dot position on sphere
+  // position dot on sphere
   const dotPos = angleToVector(theta, phi, radius);
   const camOffset = dotPos.copy().normalize().mult(300);
-  // camera looks at the dot, offset for a better view
+
   camera(
     dotPos.x + camOffset.x,
     dotPos.y + camOffset.y,
@@ -148,7 +195,6 @@ function draw() {
     0
   );
 
-  // orb wireframe: grey if recording, invisible if playback
   if (recording) {
     stroke(50);
     noFill();
@@ -159,7 +205,6 @@ function draw() {
     sphere(radius);
   }
 
-  // draw the red trail line of the recorded path
   if (trail.length > 0) {
     stroke(255, 50, 50);
     noFill();
@@ -168,7 +213,6 @@ function draw() {
     endShape();
   }
 
-  // draw the dot on sphere representing current position
   push();
   translate(dotPos.x, dotPos.y, dotPos.z);
   noStroke();
@@ -179,39 +223,40 @@ function draw() {
 }
 
 function angleToVector(theta, phi, r) {
-  // convert spherical coords to cartesian vec
   const x = r * sin(phi) * cos(theta);
   const y = r * cos(phi);
   const z = r * sin(phi) * sin(theta);
   return createVector(x, y, z);
 }
 
-async function keyPressed() {
-  if (!synthStarted) {
-    // start audio context first
-    await Tone.start();
+function safeTriggerAttack(note) {
+  if (synthStarted && synth) {
+    synth.triggerAttack(note);
+  }
+}
 
-    synth = new Tone.DuoSynth({
-      voice0: {
-        oscillator: { type: 'sine' },
-        envelope: { attack: 0.1, decay: 0.4, sustain: 0.4, release: 1.2 },
-      },
-      voice1: {
-        oscillator: { type: 'triangle' },
-        envelope: { attack: 0.1, decay: 0.4, sustain: 0.4, release: 1.2 },
-      },
-      harmonicity: 1.25,
-      vibratoAmount: 0.2,
-    }).toDestination();
+function safeTriggerRelease() {
+  if (synthStarted && synth) {
+    synth.triggerRelease();
+  }
+}
 
-    synthStarted = true;
+function safeTriggerAttackRelease(note, duration) {
+  if (synthStarted && synth) {
+    synth.triggerAttackRelease(note, duration);
+  }
+}
+
+function keyPressed() {
+  if (!started) {
+    // If audio not started yet, start it on any key press
+    startAudio();
     return;
   }
 
   if (key === 'Enter') {
-    // toggle between recording and playback modes
     if (recording) {
-      if (path.length === 0) return; // no path, no playback
+      if (path.length === 0) return;
       playbackIndex = 0;
       recording = false;
       lastNote = null;
@@ -227,15 +272,14 @@ async function keyPressed() {
       notePlaying = false;
       lastRecordTime = 0;
 
-      if (currentPlaybackNote !== null && synthStarted && synth) {
-        synth.triggerRelease();
+      if (currentPlaybackNote !== null) {
+        safeTriggerRelease();
         currentPlaybackNote = null;
       }
     }
   }
 
   if (key === ' ') {
-    // toggle drawing mode on/off while recording
     if (recording) {
       isDrawing = !isDrawing;
     }
