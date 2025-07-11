@@ -26,6 +26,11 @@ let playbackSpeed = 1;
 
 let lastRecordTime = 0;
 
+let started = false; // user interaction flag for audio context start
+
+let lastTriggerTime = 0;
+const minNoteGap = 50; // minimum gap (ms) between note triggers
+
 function setup() {
   createCanvas(800, 800, WEBGL);
   angleMode(DEGREES);
@@ -33,12 +38,70 @@ function setup() {
   textSize(24);
   fill(255);
   noStroke();
+
+  // Splash screen overlay
+  let overlay = createDiv('Click or press any key to start audio');
+  overlay.id('overlay');
+  overlay.style('position', 'fixed');
+  overlay.style('top', '0');
+  overlay.style('left', '0');
+  overlay.style('width', '100%');
+  overlay.style('height', '100%');
+  overlay.style('background-color', 'rgba(0,0,0,0.9)');
+  overlay.style('color', 'white');
+  overlay.style('display', 'flex');
+  overlay.style('justify-content', 'center');
+  overlay.style('align-items', 'center');
+  overlay.style('font-size', '32px');
+  overlay.style('z-index', '9999');
+  overlay.style('user-select', 'none');
+  overlay.style('cursor', 'pointer');
+
+  overlay.mousePressed(startAudio);
+  window.addEventListener('keydown', startAudioOnce);
+}
+
+function startAudioOnce() {
+  if (!started) {
+    startAudio();
+    window.removeEventListener('keydown', startAudioOnce);
+  }
+}
+
+async function startAudio() {
+  if (started) return;
+  started = true;
+
+  const overlay = document.getElementById('overlay');
+  if (overlay) overlay.style.display = 'none';
+
+  await Tone.start();
+
+  synth = new Tone.DuoSynth({
+    voice0: {
+      oscillator: { type: 'sine' },
+      envelope: { attack: 0.1, decay: 0.4, sustain: 0.4, release: 1.2 },
+    },
+    voice1: {
+      oscillator: { type: 'triangle' },
+      envelope: { attack: 0.1, decay: 0.4, sustain: 0.4, release: 1.2 },
+    },
+    harmonicity: 1.25,
+    vibratoAmount: 0.2,
+  }).toDestination();
+
+  synthStarted = true;
 }
 
 function draw() {
   background(0);
 
-  // adjust playback speed with Q/E keys
+  if (!started) {
+    // Wait for user to start audio
+    return;
+  }
+
+  // Adjust playback speed with Q/E keys
   if (keyIsDown(81)) { // Q
     playbackSpeed = max(0.1, playbackSpeed - 0.05);
   }
@@ -50,37 +113,37 @@ function draw() {
   let currentNote = null;
 
   if (recording) {
-    // move dot on sphere with arrow keys
+    // Move dot on sphere
     if (keyIsDown(LEFT_ARROW)) { theta += thetaSpeed; moved = true; }
     if (keyIsDown(RIGHT_ARROW)) { theta -= thetaSpeed; moved = true; }
     if (keyIsDown(UP_ARROW)) { phi += phiSpeed; moved = true; }
     if (keyIsDown(DOWN_ARROW)) { phi -= phiSpeed; moved = true; }
 
-    theta = (theta + 360) % 360; // keep theta in range
-    phi = constrain(phi, 1, 179); // avoid poles
+    theta = (theta + 360) % 360;
+    phi = constrain(phi, 1, 179);
 
     if (moved && isDrawing) {
-      const pitchPhi = phi <= 180 ? phi : 360 - phi;
-      const midiNote = map(pitchPhi, 0, 180, 48, 84);
-      currentNote = Tone.Frequency(midiNote, 'midi').toNote();
-
       const now = millis();
-      let duration = now - lastRecordTime;
-      if (lastRecordTime === 0) duration = 200;
-      lastRecordTime = now;
+      if (now - lastTriggerTime > minNoteGap) {
+        const pitchPhi = phi <= 180 ? phi : 360 - phi;
+        const midiNote = map(pitchPhi, 0, 180, 48, 84);
+        currentNote = Tone.Frequency(midiNote, 'midi').toNote();
 
-      path.push({ theta, phi, note: currentNote, duration });
-      trail.push(angleToVector(theta, phi, radius));
-      lastMoveTime = now;
+        let duration = now - lastRecordTime;
+        if (lastRecordTime === 0) duration = 200;
+        lastRecordTime = now;
 
-      if (!notePlaying) {
-        synth.triggerAttack(currentNote);
-        notePlaying = true;
+        path.push({ theta, phi, note: currentNote, duration });
+        trail.push(angleToVector(theta, phi, radius));
+        lastMoveTime = now;
+
+        safeTriggerAttackRelease(currentNote, duration / 1000);
+        lastTriggerTime = now;
         lastNote = currentNote;
       }
     }
   } else if (path.length > 0) {
-    // playback notes with speed control
+    // Playback mode - play notes in saved path with speed control
     playbackTimer -= deltaTime;
     if (playbackTimer <= 0) {
       let point = path[playbackIndex];
@@ -92,8 +155,8 @@ function draw() {
 
       trail.push(angleToVector(theta, phi, radius));
 
-      if (currentPlaybackNote !== null) synth.triggerRelease();
-      synth.triggerAttackRelease(currentNote, duration / 1000, undefined, 0.6);
+      if (currentPlaybackNote !== null) safeTriggerRelease();
+      safeTriggerAttackRelease(currentNote, duration / 1000);
       currentPlaybackNote = currentNote;
 
       playbackIndex = (playbackIndex + 1) % path.length;
@@ -101,32 +164,18 @@ function draw() {
     }
   }
 
-  // note play/release logic for recording
+  // Manage note release if no movement or not drawing
   if (recording) {
-    if (currentNote !== lastNote) {
-      if (notePlaying) {
-        synth.triggerRelease();
-        notePlaying = false;
-      }
-      if (currentNote) {
-        synth.triggerAttack(currentNote);
-        notePlaying = true;
-      }
-      lastNote = currentNote;
-    } else if ((!moved || !isDrawing) && notePlaying && millis() - lastMoveTime > noteHoldThreshold) {
-      synth.triggerRelease();
-      notePlaying = false;
+    if ((!moved || !isDrawing) && millis() - lastMoveTime > noteHoldThreshold) {
+      safeTriggerRelease();
       lastNote = null;
-    }
-    if (currentPlaybackNote !== null) {
-      synth.triggerRelease();
-      currentPlaybackNote = null;
     }
   }
 
-  // calculate dot position on sphere
+  // Dot position on sphere
   const dotPos = angleToVector(theta, phi, radius);
   const camOffset = dotPos.copy().normalize().mult(300);
+
   camera(
     dotPos.x + camOffset.x,
     dotPos.y + camOffset.y,
@@ -139,7 +188,7 @@ function draw() {
     0
   );
 
-  // orb wireframe
+  // Draw wireframe orb only in recording
   if (recording) {
     stroke(50);
     noFill();
@@ -150,7 +199,7 @@ function draw() {
     sphere(radius);
   }
 
-  // trail line
+  // Draw trail of recorded path
   if (trail.length > 0) {
     stroke(255, 50, 50);
     noFill();
@@ -159,7 +208,7 @@ function draw() {
     endShape();
   }
 
-  // draw the dot
+  // Draw dot
   push();
   translate(dotPos.x, dotPos.y, dotPos.z);
   noStroke();
@@ -176,25 +225,23 @@ function angleToVector(theta, phi, r) {
   return createVector(x, y, z);
 }
 
-async function keyPressed() {
-  if (!synthStarted) {
-    await Tone.start();
+// Safe synth calls to avoid errors when not ready
+function safeTriggerAttackRelease(note, duration) {
+  if (synthStarted && synth) {
+    synth.triggerAttackRelease(note, duration);
+  }
+}
 
-    synth = new Tone.DuoSynth({
-      voice0: {
-        oscillator: { type: 'sine' },
-        envelope: { attack: 0.1, decay: 0.4, sustain: 0.4, release: 1.2 },
-      },
-      voice1: {
-        oscillator: { type: 'triangle' },
-        envelope: { attack: 0.1, decay: 0.4, sustain: 0.4, release: 1.2 },
-      },
-      harmonicity: 1.25,
-      vibratoAmount: 0.2,
-    }).toDestination();
+function safeTriggerRelease() {
+  if (synthStarted && synth) {
+    synth.triggerRelease();
+  }
+}
 
-    synthStarted = true;
-    document.getElementById('instructions').style.display = 'none'; // hide splash
+function keyPressed() {
+  if (!started) {
+    // start audio on first keypress
+    startAudio();
     return;
   }
 
@@ -217,7 +264,7 @@ async function keyPressed() {
       lastRecordTime = 0;
 
       if (currentPlaybackNote !== null) {
-        synth.triggerRelease();
+        safeTriggerRelease();
         currentPlaybackNote = null;
       }
     }
